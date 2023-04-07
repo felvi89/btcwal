@@ -1,0 +1,102 @@
+from bitcoinlib.wallets import Wallet, wallet_delete
+from bitcoinlib.mnemonic import Mnemonic
+from bitcoinlib.services.services import Service
+import requests
+from concurrent.futures import ThreadPoolExecutor
+from bitcoinrpc.authproxy import AuthServiceProxy
+import time
+import importlib
+import subprocess
+
+required_libraries = ['bitcoinlib', 'concurrent', 'requests', 'bitcoinrpc', 'mnemonic']
+
+for lib in required_libraries:
+    try:
+        importlib.import_module(lib)
+    except ImportError:
+        subprocess.check_call(['pip', 'install', lib])
+
+strength = input('Zadajte počet slov pre seed (12 alebo 24): ')
+if strength == '12':
+    strength = 128
+elif strength == '24':
+    strength = 256
+else:
+    raise ValueError('Neplatný počet slov. Zadajte 12 alebo 24.')
+
+destination_address = input('Zadajte BTC adresu, kam sa majú poslať BTC: ')
+rpc_user = "mynode"
+rpc_password = "jetuleto"
+rpc_host = "192.168.1.138"
+rpc_port = "8332"
+
+
+def create_wallet():
+    wallet_name = 'Wallet1'
+    seed = Mnemonic().generate(strength=strength)
+    print(f'Použité slová: {seed}')
+    try:
+        wallet = Wallet.create(wallet_name, keys=seed, network='bitcoin')
+    except Exception as e:
+        if "already exists" in str(e):
+            wallet_delete(wallet_name)
+            wallet = Wallet.create(wallet_name, keys=seed, network='bitcoin')
+        else:
+            raise e
+    addresses = []
+
+    with ThreadPoolExecutor() as executor:
+        keys = executor.map(lambda _: wallet.new_key(), range(10))
+        addresses = [key.address for key in keys]
+
+    print(f'Vygenerované adresy: {addresses}')
+    return wallet, addresses
+
+
+def get_wallet_info(address):
+    rpc_connection = AuthServiceProxy(f'http://{rpc_user}:{rpc_password}@{rpc_host}:{rpc_port}')
+
+    received_by_address = rpc_connection.listreceivedbyaddress(0, True, True, address)
+    balance = received_by_address[0]['amount']
+
+    transactions = rpc_connection.listtransactions('*', 1000, 0, True)
+    n_tx = len([tx for tx in transactions if tx['address'] == address])
+
+    return balance, n_tx
+
+
+def send_btc(wallet, to_address, amount):
+    """ Odoslanie BTC z peňaženky na zadanú adresu.
+    :param wallet: Objekt peňaženky z knižnice bitcoinlib.
+    :param to_address: Adresa príjemcu.
+    :param amount: Suma v BTC.
+    """
+    fee_rate = Service().estimatefee(5)  # Získanie aktuálnej hodnoty poplatku za transakciu pre potvrdenie do 5 blokov
+    tx = wallet.send_to(to_address, amount, fee=fee_rate)
+    print(f'Transakcia bola odoslaná s ID: {tx.txid}')
+
+
+while True:
+    wallet, addresses = create_wallet()
+
+    start_time: float = time.time()
+
+    with ThreadPoolExecutor() as executor:
+        results = executor.map(get_wallet_info, addresses)
+        balances, n_txs = zip(*results)
+
+    end_time: float = time.time()
+
+    print(f'Čas potrebný na overenie 10 adries: {end_time - start_time:.2f} sekúnd')
+
+    if any(balance > 0 for balance in balances) or any(n_tx > 0 for n_tx in n_txs):
+        for balance in balances:
+            if balance > 0:
+                send_btc(wallet, destination_address, balance)
+                break
+    else:
+        print('Zostatok a počet transakcií sú nulové. Vytváram novú peňaženku.')
+        wallet_delete('Wallet1')
+
+    print(f'Zostatok peňaženiek: {balances} BTC')
+    print(f'Počet transakcií: {n_txs}')
